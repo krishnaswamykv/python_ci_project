@@ -1,0 +1,132 @@
+name: PR Review Summary
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  review-summary:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Generate Summary
+        id: summary
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              {
+                owner,
+                repo,
+                pull_number: pr.number,
+                per_page: 100
+              }
+            );
+
+            let totalAdded = 0;
+            let totalRemoved = 0;
+            let todoList = [];
+
+            let table =
+              "| File | Added | Removed |\n" +
+              "|------|-------|---------|\n";
+
+            for (const file of files) {
+              totalAdded += file.additions;
+              totalRemoved += file.deletions;
+
+              table += `| ${file.filename} | ${file.additions} | ${file.deletions} |\n`;
+
+              if (file.patch) {
+                const lines = file.patch.split("\n");
+
+                for (const line of lines) {
+                  if (
+                    line.includes("TODO") ||
+                    line.includes("FIXME")
+                  ) {
+                    todoList.push(
+                      `${file.filename}: ${line}`
+                    );
+                  }
+                }
+              }
+            }
+
+            let body =
+              `## Automated PR Review Summary\n\n` +
+              `### Statistics\n` +
+              `- Files Changed: ${files.length}\n` +
+              `- Lines Added: ${totalAdded}\n` +
+              `- Lines Removed: ${totalRemoved}\n\n`;
+
+            body += "### Diff Statistics\n\n";
+            body += table + "\n";
+
+            body += "### TODO / FIXME Found\n\n";
+
+            if (todoList.length === 0) {
+              body += "No TODO or FIXME comments detected.\n";
+            } else {
+              for (const item of todoList) {
+                body += `- ${item}\n`;
+              }
+            }
+
+            core.setOutput("commentBody", body);
+
+      - name: Create or Update Comment
+        uses: actions/github-script@v7
+        env:
+          COMMENT_BODY: ${{ steps.summary.outputs.commentBody }}
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.payload.pull_request.number;
+
+            const comments =
+              await github.paginate(
+                github.rest.issues.listComments,
+                {
+                  owner,
+                  repo,
+                  issue_number
+                }
+              );
+
+            const existing = comments.find(
+              c =>
+                c.user.type === "Bot" &&
+                c.body.includes(
+                  "Automated PR Review Summary"
+                )
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body: process.env.COMMENT_BODY
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body: process.env.COMMENT_BODY
+              });
+            }
